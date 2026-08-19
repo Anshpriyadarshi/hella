@@ -1,0 +1,6 @@
+edge-tts
+pygame
+SpeechRecognition
+PyAudio
+wikipedia
+pyttsx3
