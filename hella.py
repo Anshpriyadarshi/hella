@@ -1,10 +1,10 @@
 import asyncio
 import datetime
+import hashlib
 import os
 import subprocess
 import sys
 import tempfile
-import threading
 import urllib.parse
 import webbrowser
 
@@ -28,33 +28,46 @@ ASSISTANT_NAME = "Hella"
 VOICE = "en-IN-AartiNeural"
 LANGUAGE = "en-IN"
 
-# None = Windows default microphone
+# None = default microphone
 MICROPHONE_DEVICE_INDEX = None
 
-# Faster listening
-LISTEN_TIMEOUT = 4
-PHRASE_TIME_LIMIT = 7
+# Listening
+LISTEN_TIMEOUT = 3
+PHRASE_TIME_LIMIT = 6
 
-# Voice
+# Speech recognition
+ENERGY_THRESHOLD = 250
+
+# TTS
 TTS_RATE = "-4%"
 TTS_PITCH = "+0Hz"
 TTS_VOLUME = "+0%"
 
-# Number of Edge TTS attempts
 TTS_RETRIES = 2
 
 
 # ============================================================
-# GLOBAL OBJECTS
+# GLOBALS
 # ============================================================
 
 recognizer = sr.Recognizer()
+microphone = None
 
-recognizer.energy_threshold = 300
+recognizer.energy_threshold = ENERGY_THRESHOLD
 recognizer.dynamic_energy_threshold = True
-recognizer.pause_threshold = 0.6
-recognizer.phrase_threshold = 0.2
-recognizer.non_speaking_duration = 0.3
+
+# Lower values make Hella stop listening sooner
+recognizer.pause_threshold = 0.55
+recognizer.phrase_threshold = 0.15
+recognizer.non_speaking_duration = 0.25
+
+# Prevent overly long silence waiting
+recognizer.operation_timeout = 5
+
+
+# ============================================================
+# AUDIO
+# ============================================================
 
 audio_ready = False
 
@@ -66,7 +79,7 @@ except Exception:
 
 
 # ============================================================
-# CACHE DIRECTORY
+# TTS CACHE
 # ============================================================
 
 CACHE_DIR = os.path.join(
@@ -78,10 +91,11 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 
 # ============================================================
-# TTS
+# EDGE TTS
 # ============================================================
 
 async def generate_voice(text, filename):
+
     communicator = edge_tts.Communicate(
         text=text,
         voice=VOICE,
@@ -93,10 +107,14 @@ async def generate_voice(text, filename):
     await communicator.save(filename)
 
 
+# ============================================================
+# PLAY AUDIO
+# ============================================================
+
 def play_audio(filename):
 
     if not audio_ready:
-        raise RuntimeError("Audio unavailable")
+        raise RuntimeError("Audio system unavailable")
 
     pygame.mixer.music.stop()
     pygame.mixer.music.load(filename)
@@ -111,6 +129,10 @@ def play_audio(filename):
         pass
 
 
+# ============================================================
+# WINDOWS TTS FALLBACK
+# ============================================================
+
 def windows_fallback(text):
 
     if pyttsx3 is None:
@@ -122,6 +144,8 @@ def windows_fallback(text):
 
         voices = engine.getProperty("voices")
 
+        preferred = None
+
         for voice in voices:
 
             name = str(
@@ -132,23 +156,32 @@ def windows_fallback(text):
                 getattr(voice, "id", "")
             ).lower()
 
-            if (
-                "zira" in name
-                or "female" in name
-                or "heera" in name
-                or "aarti" in name
-                or "india" in name
-                or "zira" in voice_id
-                or "heera" in voice_id
-            ):
-                engine.setProperty(
-                    "voice",
-                    voice.id
-                )
+            if any(word in name or word in voice_id for word in (
+                "zira",
+                "female",
+                "heera",
+                "aarti",
+                "india"
+            )):
+
+                preferred = voice.id
                 break
 
-        engine.setProperty("rate", 180)
-        engine.setProperty("volume", 1.0)
+        if preferred:
+            engine.setProperty(
+                "voice",
+                preferred
+            )
+
+        engine.setProperty(
+            "rate",
+            180
+        )
+
+        engine.setProperty(
+            "volume",
+            1.0
+        )
 
         engine.say(text)
         engine.runAndWait()
@@ -160,28 +193,29 @@ def windows_fallback(text):
         return False
 
 
+# ============================================================
+# SPEAK
+# ============================================================
+
 def speak(text):
 
     if not text:
         return
 
-    # Only one short console line
-    print(f"Hella: {text}")
+    print(f"\nHella: {text}")
 
-    # Cache filename based on text
-    safe_name = str(
-        abs(hash(
-            f"{VOICE}|{TTS_RATE}|{text}"
-        ))
-    )
+    # Stable cache filename
+    cache_key = hashlib.md5(
+        f"{VOICE}|{TTS_RATE}|{text}".encode()
+    ).hexdigest()
 
     filename = os.path.join(
         CACHE_DIR,
-        safe_name + ".mp3"
+        cache_key + ".mp3"
     )
 
     # --------------------------------------------------------
-    # USE CACHED VOICE
+    # CACHE
     # --------------------------------------------------------
 
     if os.path.exists(filename):
@@ -189,6 +223,7 @@ def speak(text):
         try:
             play_audio(filename)
             return
+
         except Exception:
             pass
 
@@ -216,7 +251,7 @@ def speak(text):
                 return
 
         except Exception:
-            pass
+            continue
 
     # --------------------------------------------------------
     # FALLBACK
@@ -226,11 +261,8 @@ def speak(text):
 
 
 # ============================================================
-# MICROPHONE
+# MICROPHONE INITIALIZATION
 # ============================================================
-
-microphone = None
-
 
 def initialize_microphone():
 
@@ -242,20 +274,33 @@ def initialize_microphone():
             device_index=MICROPHONE_DEVICE_INDEX
         )
 
-        # IMPORTANT:
-        # Do this ONLY ONCE at startup.
+        print("\n🎤 Preparing microphone...")
+
+        # Calibrate only ONCE
         with microphone as source:
 
             recognizer.adjust_for_ambient_noise(
                 source,
-                duration=0.2
+                duration=0.5
             )
+
+        # Don't allow threshold to become too high
+        if recognizer.energy_threshold > 600:
+            recognizer.energy_threshold = 350
+
+        print(
+            f"🎤 Microphone ready "
+            f"(threshold: {int(recognizer.energy_threshold)})"
+        )
 
         return True
 
     except Exception as error:
 
-        print("Microphone error:", error)
+        print(
+            "\n❌ Microphone error:",
+            error
+        )
 
         return False
 
@@ -270,8 +315,12 @@ def listen():
         return ""
 
     try:
-        # Listening indicator
-        print("\r🎤 Listening...   ", end="", flush=True)
+
+        print(
+            "\n🎤 Listening...",
+            end=" ",
+            flush=True
+        )
 
         with microphone as source:
 
@@ -281,8 +330,11 @@ def listen():
                 phrase_time_limit=PHRASE_TIME_LIMIT
             )
 
-        # Recognition indicator
-        print("\r🔄 Recognising... ", end="", flush=True)
+        print(
+            "🔄",
+            end=" ",
+            flush=True
+        )
 
         try:
 
@@ -293,36 +345,50 @@ def listen():
 
             command = command.lower().strip()
 
-            # Show recognized command
             if command:
-                print(f"\r✅ You: {command}")
 
-            return command
+                print(
+                    f"You: {command}"
+                )
+
+                return command
 
         except sr.UnknownValueError:
 
-            print("\r❌ Couldn't understand.        ")
-            return ""
+            # Don't print a large error every time
+            print(
+                "..."
+            )
 
         except sr.RequestError:
 
-            print("\r❌ Speech recognition unavailable.")
-            return ""
+            print(
+                "Internet/recognition problem."
+            )
+
+        return ""
 
     except sr.WaitTimeoutError:
 
-        print("\r⏳ No speech detected.           ")
+        # Normal silence
         return ""
 
     except OSError:
 
-        print("\r❌ Microphone error.              ")
+        print(
+            "\n❌ Microphone disconnected."
+        )
+
         return ""
 
     except Exception as error:
 
-        print(f"\r❌ Error: {error}")
+        print(
+            f"\n❌ Listening error: {error}"
+        )
+
         return ""
+
 
 # ============================================================
 # TIME
@@ -361,7 +427,10 @@ def tell_date():
 def open_website(url, name):
 
     webbrowser.open(url)
-    speak(f"Opening {name}.")
+
+    speak(
+        f"Opening {name}."
+    )
 
 
 # ============================================================
@@ -419,7 +488,7 @@ def play_favourite_song():
     )
 
     webbrowser.open(
-        "https://youtu.be/aroZ0SSNoEo?si=LtnwYpomM5Q-A_rl"
+        "https://youtu.be/aroZ0SSNoEo"
     )
 
 
@@ -429,15 +498,27 @@ def play_favourite_song():
 
 def google_search(command):
 
-    query = command.replace(
+    query = command
+
+    search_words = [
+        "search for",
         "search",
-        "",
-        1
-    ).strip()
+        "google"
+    ]
+
+    for word in search_words:
+
+        if query.startswith(word):
+
+            query = query[len(word):].strip()
+            break
 
     if not query:
 
-        speak("What should I search for?")
+        speak(
+            "What should I search for?"
+        )
+
         return
 
     url = (
@@ -458,11 +539,18 @@ def google_search(command):
 
 def wikipedia_search(command):
 
-    topic = command.replace(
-        "wikipedia",
-        "",
-        1
-    ).strip()
+    topic = command
+
+    for word in (
+        "wikipedia search",
+        "search wikipedia",
+        "wikipedia"
+    ):
+
+        if topic.startswith(word):
+
+            topic = topic[len(word):].strip()
+            break
 
     if not topic:
 
@@ -515,11 +603,15 @@ def open_notepad():
             ["notepad.exe"]
         )
 
-        speak("Opening Notepad.")
+        speak(
+            "Opening Notepad."
+        )
 
     except Exception:
 
-        speak("I couldn't open Notepad.")
+        speak(
+            "I couldn't open Notepad."
+        )
 
 
 def open_calculator():
@@ -530,11 +622,15 @@ def open_calculator():
             ["calc.exe"]
         )
 
-        speak("Opening Calculator.")
+        speak(
+            "Opening Calculator."
+        )
 
     except Exception:
 
-        speak("I couldn't open Calculator.")
+        speak(
+            "I couldn't open Calculator."
+        )
 
 
 def open_vscode():
@@ -542,15 +638,19 @@ def open_vscode():
     try:
 
         subprocess.Popen(
-            ["code"],
+            "code",
             shell=True
         )
 
-        speak("Opening Visual Studio Code.")
+        speak(
+            "Opening Visual Studio Code."
+        )
 
     except Exception:
 
-        speak("I couldn't open Visual Studio Code.")
+        speak(
+            "I couldn't open Visual Studio Code."
+        )
 
 
 # ============================================================
@@ -560,7 +660,7 @@ def open_vscode():
 def introduce():
 
     speak(
-        "I am Hella your personal assistant ."
+        "I am Hella, your personal AI assistant."
     )
 
 
@@ -571,7 +671,7 @@ def introduce():
 def how_are_you():
 
     speak(
-        "I am functioning perfectly boss."
+        "I am functioning perfectly, boss."
     )
 
 
@@ -584,12 +684,13 @@ def show_help():
     speak(
         "I can open websites, search Google, "
         "search Wikipedia, tell time and date, "
-        "open Windows apps, and play your song."
+        "open Notepad, Calculator and Visual Studio Code, "
+        "play your favourite song, and open your LMS."
     )
 
 
 # ============================================================
-# COMMAND PROCESSOR
+# PARTIAL COMMAND PROCESSING
 # ============================================================
 
 def process_command(command):
@@ -597,18 +698,18 @@ def process_command(command):
     if not command:
         return True
 
+    command = command.lower().strip()
+
     # --------------------------------------------------------
     # EXIT
     # --------------------------------------------------------
 
     if (
-        command in (
-            "exit",
-            "bye",
-            "quit",
-            "stop",
-            "shutdown"
-        )
+        command.startswith("exit")
+        or command.startswith("quit")
+        or command.startswith("bye")
+        or command.startswith("stop")
+        or command.startswith("shutdown")
         or "goodbye" in command
     ):
 
@@ -622,12 +723,12 @@ def process_command(command):
     # TIME
     # --------------------------------------------------------
 
-    if (
-        command == "time"
-        or "what is the time" in command
-        or "what's the time" in command
-        or "tell me the time" in command
-    ):
+    if any(word in command for word in (
+        "time",
+        "what time",
+        "tell time",
+        "current time"
+    )):
 
         tell_time()
         return True
@@ -636,13 +737,13 @@ def process_command(command):
     # DATE
     # --------------------------------------------------------
 
-    if (
-        command == "date"
-        or "what is the date" in command
-        or "what's the date" in command
-        or "today's date" in command
-        or "tell me the date" in command
-    ):
+    if any(word in command for word in (
+        "date",
+        "what date",
+        "today date",
+        "today's date",
+        "current date"
+    )):
 
         tell_date()
         return True
@@ -651,10 +752,12 @@ def process_command(command):
     # YOUTUBE
     # --------------------------------------------------------
 
-    if (
-        command == "youtube"
-        or "open youtube" in command
-    ):
+    if any(word in command for word in (
+        "youtube",
+        "you tube",
+        "open you",
+        "open yo"
+    )):
 
         open_youtube()
         return True
@@ -663,10 +766,11 @@ def process_command(command):
     # GOOGLE
     # --------------------------------------------------------
 
-    if (
-        command == "google"
-        or "open google" in command
-    ):
+    if any(word in command for word in (
+        "google",
+        "open goo",
+        "open gog"
+    )):
 
         open_google()
         return True
@@ -675,10 +779,12 @@ def process_command(command):
     # LINKEDIN
     # --------------------------------------------------------
 
-    if (
-        "open linkedin" in command
-        or "open linked in" in command
-    ):
+    if any(word in command for word in (
+        "linkedin",
+        "linked in",
+        "open link",
+        "open linked"
+    )):
 
         open_linkedin()
         return True
@@ -687,23 +793,27 @@ def process_command(command):
     # GITHUB
     # --------------------------------------------------------
 
-    if (
-        command == "github"
-        or "open github" in command
-    ):
+    if any(word in command for word in (
+        "github",
+        "git hub",
+        "open git"
+    )):
 
         open_github()
         return True
 
     # --------------------------------------------------------
-    # LMS
+    # LMS / DASHBOARD
     # --------------------------------------------------------
 
-    if (
-        "open lms" in command
-        or "open my lms" in command
-        or "open dashboard" in command
-    ):
+    if any(word in command for word in (
+        "lms",
+        "open lm",
+        "dashboard",
+        "open dash",
+        "my dashboard",
+        "coding gita"
+    )):
 
         open_lms()
         return True
@@ -712,11 +822,15 @@ def process_command(command):
     # SONG
     # --------------------------------------------------------
 
-    if (
-        "play my favourite song" in command
-        or "play my favorite song" in command
-        or "play my song" in command
-    ):
+    if any(word in command for word in (
+        "favourite song",
+        "favorite song",
+        "play my song",
+        "play song",
+        "play my fav",
+        "play my favourite",
+        "play my favorite"
+    )):
 
         play_favourite_song()
         return True
@@ -725,46 +839,39 @@ def process_command(command):
     # GOOGLE SEARCH
     # --------------------------------------------------------
 
-    if command == "search":
-
-        speak(
-            "What should I search for?"
-        )
-
-        return True
-
-    if command.startswith("search "):
+    if (
+        command == "search"
+        or command.startswith("search ")
+        or command.startswith("search for ")
+        or command.startswith("google search ")
+    ):
 
         google_search(command)
-
         return True
 
     # --------------------------------------------------------
     # WIKIPEDIA
     # --------------------------------------------------------
 
-    if command == "wikipedia":
-
-        speak(
-            "What should I search for?"
-        )
-
-        return True
-
-    if command.startswith("wikipedia "):
+    if (
+        command == "wikipedia"
+        or command.startswith("wikipedia ")
+        or command.startswith("search wikipedia ")
+    ):
 
         wikipedia_search(command)
-
         return True
 
     # --------------------------------------------------------
     # NOTEPAD
     # --------------------------------------------------------
 
-    if (
-        "open notepad" in command
-        or "open note pad" in command
-    ):
+    if any(word in command for word in (
+        "notepad",
+        "note pad",
+        "open note",
+        "open not"
+    )):
 
         open_notepad()
         return True
@@ -773,7 +880,11 @@ def process_command(command):
     # CALCULATOR
     # --------------------------------------------------------
 
-    if "open calculator" in command:
+    if any(word in command for word in (
+        "calculator",
+        "calc",
+        "open cal"
+    )):
 
         open_calculator()
         return True
@@ -782,11 +893,13 @@ def process_command(command):
     # VS CODE
     # --------------------------------------------------------
 
-    if (
-        "open vs code" in command
-        or "open vscode" in command
-        or "open visual studio code" in command
-    ):
+    if any(word in command for word in (
+        "vs code",
+        "vscode",
+        "visual studio",
+        "open vs",
+        "open visual"
+    )):
 
         open_vscode()
         return True
@@ -795,11 +908,13 @@ def process_command(command):
     # INTRODUCTION
     # --------------------------------------------------------
 
-    if (
-        "introduce yourself" in command
-        or "who are you" in command
-        or "what are you" in command
-    ):
+    if any(word in command for word in (
+        "who are you",
+        "who are",
+        "what are you",
+        "introduce yourself",
+        "introduce"
+    )):
 
         introduce()
         return True
@@ -808,7 +923,10 @@ def process_command(command):
     # STATUS
     # --------------------------------------------------------
 
-    if "how are you" in command:
+    if any(word in command for word in (
+        "how are you",
+        "how are"
+    )):
 
         how_are_you()
         return True
@@ -820,9 +938,97 @@ def process_command(command):
     if (
         command == "help"
         or "what can you do" in command
+        or command.startswith("help me")
     ):
 
         show_help()
+        return True
+
+    # --------------------------------------------------------
+    # EXTRA COMMANDS
+    # --------------------------------------------------------
+
+    # Open browser
+    if any(word in command for word in (
+        "open browser",
+        "browser"
+    )):
+
+        webbrowser.open(
+            "https://www.google.com"
+        )
+
+        speak(
+            "Opening the browser."
+        )
+
+        return True
+
+    # Open Gmail
+    if any(word in command for word in (
+        "gmail",
+        "open mail",
+        "open gmail"
+    )):
+
+        open_website(
+            "https://mail.google.com",
+            "Gmail"
+        )
+
+        return True
+
+    # Open ChatGPT
+    if any(word in command for word in (
+        "chatgpt",
+        "chat gpt",
+        "open chat"
+    )):
+
+        open_website(
+            "https://chatgpt.com",
+            "ChatGPT"
+        )
+
+        return True
+
+    # Open Figma
+    if any(word in command for word in (
+        "figma",
+        "open figma"
+    )):
+
+        open_website(
+            "https://www.figma.com",
+            "Figma"
+        )
+
+        return True
+
+    # Open Instagram
+    if any(word in command for word in (
+        "instagram",
+        "open instagram"
+    )):
+
+        open_website(
+            "https://www.instagram.com",
+            "Instagram"
+        )
+
+        return True
+
+    # Open WhatsApp Web
+    if any(word in command for word in (
+        "whatsapp",
+        "open whatsapp"
+    )):
+
+        open_website(
+            "https://web.whatsapp.com",
+            "WhatsApp"
+        )
+
         return True
 
     # --------------------------------------------------------
@@ -830,7 +1036,7 @@ def process_command(command):
     # --------------------------------------------------------
 
     speak(
-        "I don't know that command yet."
+        "I didn't catch that command."
     )
 
     return True
@@ -859,7 +1065,7 @@ def startup():
     speak(greeting)
 
     speak(
-        " i am hella, your personal assistant how can i help you today , should i make a webpage for you ?"
+        "I am Hella. How can I help you?"
     )
 
 
@@ -870,39 +1076,12 @@ def startup():
 def cleanup():
 
     try:
+
         pygame.mixer.music.stop()
         pygame.mixer.quit()
+
     except Exception:
         pass
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    # Initialize microphone ONCE
-    if not initialize_microphone():
-
-        speak(
-            "I couldn't access the microphone."
-        )
-
-        return
-
-    startup()
-
-    while True:
-
-        command = listen()
-
-        if command:
-
-            if not process_command(command):
-                break
-
-    cleanup()
 
 
 # ============================================================
@@ -918,7 +1097,9 @@ def show_microphones():
             .list_microphone_names()
         )
 
-        print("\nAvailable microphones:\n")
+        print(
+            "\nAvailable microphones:\n"
+        )
 
         for index, name in enumerate(
             microphones
@@ -934,6 +1115,59 @@ def show_microphones():
             "Microphone error:",
             error
         )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print(
+        "\n================================"
+    )
+
+    print(
+        "       HELLA AI ASSISTANT"
+    )
+
+    print(
+        "================================"
+    )
+
+    # --------------------------------------------------------
+    # MICROPHONE
+    # --------------------------------------------------------
+
+    if not initialize_microphone():
+
+        speak(
+            "I couldn't access the microphone."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # STARTUP
+    # --------------------------------------------------------
+
+    startup()
+
+    # --------------------------------------------------------
+    # MAIN LOOP
+    # --------------------------------------------------------
+
+    while True:
+
+        command = listen()
+
+        if not command:
+            continue
+
+        if not process_command(command):
+            break
+
+    cleanup()
 
 
 # ============================================================
@@ -953,5 +1187,9 @@ if __name__ == "__main__":
             main()
 
         except KeyboardInterrupt:
+
+            print(
+                "\n\nHella stopped."
+            )
 
             cleanup()
