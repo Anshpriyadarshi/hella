@@ -270,6 +270,8 @@ def listen():
         return ""
 
     try:
+        # Listening indicator
+        print("\r🎤 Listening...   ", end="", flush=True)
 
         with microphone as source:
 
@@ -279,6 +281,9 @@ def listen():
                 phrase_time_limit=PHRASE_TIME_LIMIT
             )
 
+        # Recognition indicator
+        print("\r🔄 Recognising... ", end="", flush=True)
+
         try:
 
             command = recognizer.recognize_google(
@@ -286,32 +291,38 @@ def listen():
                 language=LANGUAGE
             )
 
-            return command.lower().strip()
+            command = command.lower().strip()
+
+            # Show recognized command
+            if command:
+                print(f"\r✅ You: {command}")
+
+            return command
 
         except sr.UnknownValueError:
 
+            print("\r❌ Couldn't understand.        ")
             return ""
 
         except sr.RequestError:
 
-            speak(
-                "Speech recognition is unavailable."
-            )
-
+            print("\r❌ Speech recognition unavailable.")
             return ""
 
     except sr.WaitTimeoutError:
 
+        print("\r⏳ No speech detected.           ")
         return ""
 
     except OSError:
 
+        print("\r❌ Microphone error.              ")
         return ""
 
-    except Exception:
+    except Exception as error:
 
+        print(f"\r❌ Error: {error}")
         return ""
-
 
 # ============================================================
 # TIME
@@ -549,7 +560,7 @@ def open_vscode():
 def introduce():
 
     speak(
-        "I am Hella your personal AI assistant."
+        "I am Hella your personal assistant ."
     )
 
 
@@ -848,7 +859,7 @@ def startup():
     speak(greeting)
 
     speak(
-        "I am Hella. How can I help?"
+        " i am hella, your personal assistant how can i help you today , should i make a webpage for you ?"
     )
 
 
